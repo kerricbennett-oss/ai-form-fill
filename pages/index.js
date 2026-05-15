@@ -33,6 +33,7 @@ const s = {
   fieldsScroll: { maxHeight: 380, overflowY: 'auto', padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 5 },
   fieldsEmpty: { padding: '20px 16px', fontSize: 13, color: '#aaa', textAlign: 'center', fontStyle: 'italic' },
   fi: { display: 'flex', alignItems: 'center', gap: 7, padding: '6px 9px', borderRadius: 8, border: '0.5px solid #eee', background: '#fff' },
+  fiActive: { display: 'flex', alignItems: 'center', gap: 7, padding: '6px 9px', borderRadius: 8, border: '0.5px solid #1D9E75', background: '#F0FAF6' },
   fiLbl: { fontSize: 11, color: '#888', width: 140, flexShrink: 0 },
   fiValEmpty: { fontSize: 11, color: '#bbb', fontStyle: 'italic', flex: 1 },
   fiValFilling: { fontSize: 11, color: '#0C447C', background: '#E6F1FB', padding: '1px 6px', borderRadius: 3, flex: 1 },
@@ -86,6 +87,7 @@ export default function Home() {
   const [autoMode, setAutoMode] = useState(false)
   const [editingId, setEditingId] = useState(null)
   const [editValue, setEditValue] = useState('')
+  const [activeFieldId, setActiveFieldId] = useState(null)
   const msgsRef = useRef(null)
   const fileRef = useRef(null)
   const recogRef = useRef(null)
@@ -105,16 +107,27 @@ export default function Home() {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) return
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     const r = new SR()
-    r.continuous = false; r.interimResults = true; r.lang = 'en-US'
+    r.continuous = true; r.interimResults = true; r.lang = 'en-US'
     recogRef.current = r
     if (auto) setAutoMode(true)
     setIsRec(true)
-    r.onresult = e => setInput(Array.from(e.results).map(x => x[0].transcript).join(''))
-    r.onend = () => {
-      setIsRec(false)
-      setTimeout(() => { if (textareaRef.current?.value?.trim()) handleSendRef.current?.() }, 100)
+
+    let silenceTimer = null
+    r.onresult = e => {
+      const transcript = Array.from(e.results).map(x => x[0].transcript).join('')
+      setInput(transcript)
+      // reset silence timer on every new speech result
+      clearTimeout(silenceTimer)
+      silenceTimer = setTimeout(() => {
+        r.stop()
+      }, 3500)
     }
-    r.onerror = () => { setIsRec(false); setAutoMode(false) }
+    r.onend = () => {
+      clearTimeout(silenceTimer)
+      setIsRec(false)
+      setTimeout(() => { if (textareaRef.current?.value?.trim()) handleSendRef.current?.() }, 200)
+    }
+    r.onerror = () => { clearTimeout(silenceTimer); setIsRec(false); setAutoMode(false) }
     r.start()
   }
 
@@ -206,9 +219,23 @@ export default function Home() {
       setMessages(m => m.filter(x => x.role !== 'typing'))
 
       const validIds = new Set(fields.map(f => f.id))
+      console.log('API returned extracted:', JSON.stringify(data.extracted))
       const extracted = Object.fromEntries(
-        Object.entries(data.extracted || {}).filter(([id, val]) => validIds.has(id) && val)
+        Object.entries(data.extracted || {})
+          .filter(([id, val]) => validIds.has(id) && val !== null && val !== undefined && val !== '')
+          .map(([id, val]) => {
+            if (val === true || val === 'true') return [id, 'Yes']
+            if (val === false || val === 'false') return [id, 'No']
+            return [id, String(val)]
+          })
       )
+      console.log('After filter extracted:', JSON.stringify(extracted))
+
+      // highlight the field being asked about next
+      if (data.askingId && fields.find(f => f.id === data.askingId)) {
+        setActiveFieldId(data.askingId)
+        fieldItemRefs.current[data.askingId]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      }
 
       if (Object.keys(extracted).length > 0) {
         const ids = Object.keys(extracted)
@@ -245,13 +272,49 @@ export default function Home() {
     startListening(true)
   }
 
-  function exportForm() {
-    const lines = ['COMPLETED FORM', '==============', '']
-    fields.forEach(f => lines.push(`${f.label}: ${filledValues[f.id] || '(blank)'}`))
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/plain' }))
-    a.download = 'completed_form.txt'
-    a.click()
+  async function exportForm() {
+    const { jsPDF } = await import('jspdf')
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+
+    // Page 1: original form image
+    if (b64 && mime && mime.startsWith('image/')) {
+      const imgData = `data:${mime};base64,${b64}`
+      const fmt = mime.includes('png') ? 'PNG' : 'JPEG'
+      doc.addImage(imgData, fmt, 10, 10, 190, 0)
+    } else {
+      doc.setFontSize(13)
+      doc.setTextColor(150)
+      doc.text('(PDF upload — original form not shown)', 105, 148, { align: 'center' })
+    }
+
+    // Page 2: completed summary
+    doc.addPage()
+    doc.setFontSize(16)
+    doc.setFont(undefined, 'bold')
+    doc.setTextColor(0)
+    doc.text('COMPLETED FORM', 105, 20, { align: 'center' })
+    doc.setFontSize(10)
+    doc.setFont(undefined, 'normal')
+    doc.setTextColor(120)
+    doc.text(`Exported: ${new Date().toLocaleDateString()}`, 105, 28, { align: 'center' })
+    doc.setDrawColor(200)
+    doc.line(15, 33, 195, 33)
+
+    let y = 43
+    doc.setTextColor(0)
+    fields.forEach(f => {
+      const val = filledValues[f.id] || '(blank)'
+      doc.setFont(undefined, 'bold')
+      doc.setFontSize(10)
+      doc.text(`${f.label}:`, 15, y)
+      doc.setFont(undefined, 'normal')
+      const lines = doc.splitTextToSize(val, 115)
+      doc.text(lines, 80, y)
+      y += Math.max(8, lines.length * 6)
+      if (y > 270) { doc.addPage(); y = 20 }
+    })
+
+    doc.save('completed_form.pdf')
   }
 
   const filledCount = Object.keys(filledValues).length
@@ -323,7 +386,7 @@ export default function Home() {
               ? <div style={s.fieldsEmpty}>Scan a form to detect its fields</div>
               : <div ref={fieldsScrollRef} style={s.fieldsScroll}>
                   {fields.map(f => (
-                    <div key={f.id} ref={el => { if (el) fieldItemRefs.current[f.id] = el; else delete fieldItemRefs.current[f.id] }} style={s.fi}>
+                    <div key={f.id} ref={el => { if (el) fieldItemRefs.current[f.id] = el; else delete fieldItemRefs.current[f.id] }} style={activeFieldId === f.id ? s.fiActive : s.fi}>
                       <span style={s.fiLbl}>{f.label}</span>
                       {editingId === f.id
                         ? <input
@@ -400,7 +463,7 @@ export default function Home() {
         <div style={s.progTrack}><div style={{ ...s.progFill, width: pct + '%' }} /></div>
         <span style={s.progLbl}>{pct}% complete</span>
         <button style={filledCount === 0 ? s.expBtnDisabled : s.expBtn} onClick={exportForm} disabled={filledCount === 0}>
-          Export completed form
+          Export as PDF
         </button>
       </div>
 
