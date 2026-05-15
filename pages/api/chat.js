@@ -25,8 +25,12 @@ ${state}
 CRITICAL RULES:
 - In the "extracted" object, keys MUST be exact field IDs from this list: ${validIds}
 - NEVER use field labels (like "Cancer") as keys — always use the ID (like "f18")
-- Extract ALL values the user mentions, even if they mention multiple fields at once
-- Always overwrite a field if the user gives a new or corrected value
+- ALWAYS put something in "extracted" when the user provides ANY information — never return extracted:{} when the user gave you data
+- For yes/no or checkbox fields, use the string "Yes" or "No" — never use true/false booleans
+- When the user answers "no", "nope", "none", or "I don't have any" to a yes/no question, ALWAYS extract "No" for that field — do not leave it empty
+- For list fields (medications, allergies, surgeries, etc.): accumulate ALL items the user has mentioned so far into ONE combined value, and write the full combined list every single turn. Example: if the field already has "Lisinopril 10mg" and user now says "also Eliquis 5mg", write extracted: {fX: "Lisinopril 10mg; Eliquis 5mg twice daily (blood thinner)"}
+- Never say you "recorded" or "noted" something without also putting it in extracted
+- Always overwrite a field with the latest full value (including all accumulated items)
 - After filling, ask specifically about the next empty field by its label name
 - If user says "skip", "next", or "I don't know", leave it empty and ask about the next field
 - If all fields are filled, congratulate the user
@@ -61,7 +65,12 @@ Return raw JSON only — no explanation, no markdown.`
       parsed = { reply: raw, extracted: {} }
     }
 
-    res.json(parsed)
+    console.log('Chat raw:', raw.slice(0, 300))
+    console.log('Chat extracted:', JSON.stringify(parsed.extracted))
+    // attach the next empty field so the UI can highlight it
+    const updatedFilled = { ...filledValues, ...(parsed.extracted || {}) }
+    const askingField = fields.find(f => !updatedFilled[f.id])
+    res.json({ ...parsed, askingId: askingField?.id || null })
   } catch (err) {
     console.error('Chat error:', err)
     res.status(500).json({ error: err.message })
