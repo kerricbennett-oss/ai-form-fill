@@ -16,6 +16,7 @@ export default async function handler(req, res) {
   if (!rawPages.length || !rawPages[0].base64) return res.status(400).json({ error: 'Missing file data' })
 
   const fillableFieldNames = req.body.fillableFieldNames || null
+  const detectedBoxes = req.body.detectedBoxes || null
 
   try {
     const pageBlocks = rawPages.map(p =>
@@ -26,7 +27,6 @@ export default async function handler(req, res) {
 
     const isPDF = rawPages.every(p => p.mediaType === 'application/pdf')
 
-    // Label-mapping mode: fillable PDF — Claude maps field names to human-readable labels only
     const promptText = fillableFieldNames
       ? `This PDF has fillable form fields with these internal names: ${fillableFieldNames.join(', ')}.
 Look at the form and return a JSON array mapping each field name to a human-readable label.
@@ -34,6 +34,19 @@ Format (raw JSON array only, no markdown):
 {"id":"<exact field name>","label":"Human Readable Label","type":"text"}
 Types: text, date, checkbox, number, select, signature, textarea
 Return one entry per field name. Start with [ and end with ].`
+      : detectedBoxes && detectedBoxes.length > 0
+      ? `This form has ${detectedBoxes.length} detected field boxes. Their positions (x,y,w,h as % of page, page is 1-based):
+${detectedBoxes.map((b, i) => `b${i}: page=${b.page} x=${b.x} y=${b.y} w=${b.w} h=${b.h} conf=${b.confidence}`).join('\n')}
+
+Look at the form and assign each box a human-readable label and field type.
+Return a JSON array only — no markdown, no backticks:
+[{"id":"f1","label":"First Name","type":"text","x":10.5,"y":23.2,"w":45.0,"h":4.1,"confidence":0.9,"page":1}]
+Rules:
+- Use the EXACT x, y, w, h, confidence, page values from the list above — do NOT change coordinates.
+- Assign sequential ids: f1, f2, f3, ...
+- Types: text, date, checkbox, number, select, signature, textarea
+- Omit any box that is clearly not a form field (decorative lines, logo boxes, etc.)
+Start with [ and end with ].`
       : `Carefully examine this form (all pages) and identify every fillable field.
 Include text fields, checkboxes, date fields, dropdowns, signature lines, and table rows.
 Each item must follow this exact JSON format (no markdown, no backticks, no explanation — raw JSON array only):
