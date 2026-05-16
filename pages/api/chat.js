@@ -33,6 +33,8 @@ CRITICAL RULES:
 - Always overwrite a field with the latest full value (including all accumulated items)
 - After filling, ask specifically about the next empty field by its label name
 - If user says "skip", "next", or "I don't know", leave it empty and ask about the next field
+- When a user's answer makes other fields clearly inapplicable (e.g., "never" for alcohol use means "most recent date of alcohol use" does not apply, or "no surgeries" means "surgery dates/details" don't apply), immediately extract "N/A" for ALL those inapplicable fields in the same response — do not leave them empty
+- If the user says "that's it", "I'm done", "I'm finished", "that's all", or similar — extract everything they gave you, then list any fields still empty and ask if they want to fill them or skip them
 - If all fields are filled, congratulate the user
 
 Next empty field: ${nextEmpty ? `${nextEmpty.id} — "${nextEmpty.label}"` : 'none — form is complete'}
@@ -51,7 +53,7 @@ Return raw JSON only — no explanation, no markdown.`
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
+      max_tokens: 4096,
       system,
       messages
     })
