@@ -14,7 +14,7 @@ const s = {
   cardHdrRight: { marginLeft: 'auto', fontSize: 11, color: '#999', fontWeight: 400 },
 
   dropZone: { margin: 14, border: '1.5px dashed #ddd', borderRadius: 10, padding: '28px 16px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, cursor: 'pointer', background: '#fafafa', transition: 'all 0.2s' },
-  dropZoneHover: { borderColor: '#1D9E75', background: '#E1F5EE' },
+  dropZoneHover: { border: '1.5px dashed #1D9E75', background: '#E1F5EE' },
   dropIcon: { fontSize: 32, color: '#bbb' },
   dropText: { fontSize: 13, color: '#666', textAlign: 'center', lineHeight: 1.5 },
   dropSub: { fontSize: 11, color: '#aaa' },
@@ -70,6 +70,11 @@ const s = {
   emailBtn: { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '0.5px solid #85B7EB', color: '#0C447C', background: 'transparent', cursor: 'pointer', fontFamily: 'inherit' },
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   modal: { background: '#fff', borderRadius: 14, padding: '28px 28px 22px', width: 340, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
+  previewModal: { background: '#fff', borderRadius: 14, padding: '20px 24px', width: '82vw', maxWidth: 720, maxHeight: '88vh', display: 'flex', flexDirection: 'column', gap: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
+  previewModalHdr: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
+  previewModalSub: { fontSize: 12, color: '#888', marginTop: -6 },
+  previewImgWrap: { overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 8, border: '0.5px solid #eee', borderRadius: 8, padding: 8, background: '#f9f9f9' },
+  previewDlBtn: { fontSize: 13, padding: '8px 20px', borderRadius: 8, border: 'none', background: '#1D9E75', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 500 },
   modalTitle: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
   modalInput: { border: '0.5px solid #ddd', borderRadius: 8, padding: '8px 12px', fontSize: 13, fontFamily: 'inherit', outline: 'none' },
   modalRow: { display: 'flex', gap: 8, justifyContent: 'flex-end' },
@@ -98,8 +103,8 @@ export default function Home() {
   const [emailAddr, setEmailAddr] = useState('')
   const [emailSending, setEmailSending] = useState(false)
   const [isFillablePdf, setIsFillablePdf] = useState(false)
-  const [showPreview, setShowPreview] = useState(false)
-  const [previewCanvas, setPreviewCanvas] = useState(null)
+  const [showExportPreview, setShowExportPreview] = useState(false)
+  const [previewUrls, setPreviewUrls] = useState([])
   const msgsRef = useRef(null)
   const fileRef = useRef(null)
   const recogRef = useRef(null)
@@ -356,12 +361,36 @@ export default function Home() {
 
   function overlayCanvas(canvas, pageNum) {
     const ctx = canvas.getContext('2d')
-    // Fixed font size relative to canvas width — consistent across all field types
-    const fontSize = Math.round(canvas.width * 0.009)
+    const maxFontSize = Math.round(canvas.width * 0.009)
+    const minFontSize = 7
+
+    function shrinkToFit(text, boxW, startSize) {
+      let size = startSize
+      ctx.font = `${size}px Arial, sans-serif`
+      while (size > minFontSize && ctx.measureText(text).width > boxW) {
+        size--
+        ctx.font = `${size}px Arial, sans-serif`
+      }
+      return size
+    }
+
+    function wrapWords(text, boxW) {
+      const words = text.split(' ')
+      const lines = []
+      let line = ''
+      for (const word of words) {
+        const test = line ? `${line} ${word}` : word
+        if (ctx.measureText(test).width <= boxW) { line = test }
+        else { if (line) lines.push(line); line = word }
+      }
+      if (line) lines.push(line)
+      return lines
+    }
+
     fields.forEach(f => {
       if ((f.page || 1) !== pageNum) return
       const val = filledValues[f.id]
-      if (!val || f.x == null || f.y == null) return
+      if (!val || /^n\/?a$/i.test(val.trim()) || f.x == null || f.y == null) return
       const fx = (f.x / 100) * canvas.width
       const fy = (f.y / 100) * canvas.height
       const fw = (f.w / 100) * canvas.width
@@ -370,41 +399,49 @@ export default function Home() {
       if (f.type === 'checkbox') {
         const checked = /yes|true|x/i.test(val)
         if (!checked) return
-        const checkSize = Math.round(canvas.width * 0.014)
+        const checkSize = Math.round(Math.min(fw, fieldH) * 0.7)
+        const cx = fx + fw / 2
+        const cy = fy + fieldH / 2
         ctx.fillStyle = '#000000'
         ctx.strokeStyle = '#000000'
         ctx.lineWidth = checkSize * 0.12
         ctx.font = `bold ${checkSize}px Arial, sans-serif`
-        ctx.fillText('✔', fx + 2, fy + checkSize * 1.1)
-        ctx.strokeText('✔', fx + 2, fy + checkSize * 1.1)
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText('✔', cx, cy)
+        ctx.strokeText('✔', cx, cy)
+        ctx.textAlign = 'left'
+        ctx.textBaseline = 'alphabetic'
       } else {
         ctx.fillStyle = '#111111'
-        ctx.font = `${fontSize}px Arial, sans-serif`
-        ctx.fillText(val, fx + 2, fy + fontSize * 1.1, fw - 4)
+        const boxW = fw - 4
+        const isMultiLine = fieldH > maxFontSize * 2.5
+
+        if (isMultiLine) {
+          // Tall field: wrap text across lines
+          const fontSize = shrinkToFit(val, boxW * 3, maxFontSize) // allow wider before wrapping
+          const lines = wrapWords(val, boxW)
+          const lineH = fontSize * 1.4
+          lines.forEach((ln, i) => {
+            const lineY = fy + fontSize * 1.1 + i * lineH
+            if (lineY < fy + fieldH) ctx.fillText(ln, fx + 2, lineY, boxW)
+          })
+        } else {
+          // Single-line field: shrink font until text fits
+          const fontSize = shrinkToFit(val, boxW, maxFontSize)
+          ctx.fillText(val, fx + 2, fy + fontSize * 1.1, boxW)
+        }
       }
     })
   }
 
-  async function buildPdf() {
+  async function renderCanvases() {
     const p0 = pages[0]
     const hasCoords = fields.some(f => f.x != null)
     const isPdf = p0?.mime === 'application/pdf'
-    const pdfW = 210
-
-    // Fillable PDF: use pdf-lib to fill actual form fields — 100% accurate placement
-    if (isFillablePdf && isPdf && p0?.b64) {
-      const valuesByFieldName = {}
-      fields.forEach(f => {
-        if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id]
-      })
-      const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
-      return { type: 'fillable', bytes: filledBytes }
-    }
-
-    const { jsPDF } = await import('jspdf')
+    const results = []
 
     if (!isPdf && p0?.previewSrc && hasCoords) {
-      let doc = null
       for (let i = 0; i < pages.length; i++) {
         const p = pages[i]
         if (!p.previewSrc) continue
@@ -415,40 +452,55 @@ export default function Home() {
         canvas.width = img.naturalWidth; canvas.height = img.naturalHeight
         canvas.getContext('2d').drawImage(img, 0, 0)
         overlayCanvas(canvas, i + 1)
-        const pdfH = (canvas.height / canvas.width) * pdfW
-        if (!doc) {
-          doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
-        } else {
-          doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
-        }
-        doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
+        results.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.95), width: canvas.width, height: canvas.height })
       }
-      return doc
+    } else if (isPdf && hasCoords) {
+      try {
+        const pdfjsLib = await import('pdfjs-dist')
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+        for (const p of pages) {
+          const arr = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0))
+          const pdf = await pdfjsLib.getDocument({ data: arr }).promise
+          for (let num = 1; num <= pdf.numPages; num++) {
+            const page = await pdf.getPage(num)
+            const vp = page.getViewport({ scale: 2 })
+            const canvas = document.createElement('canvas')
+            canvas.width = vp.width; canvas.height = vp.height
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise
+            overlayCanvas(canvas, num)
+            results.push({ dataUrl: canvas.toDataURL('image/jpeg', 0.95), width: canvas.width, height: canvas.height })
+          }
+        }
+      } catch (err) {
+        console.error('PDF render failed:', err)
+      }
+    }
+    return results
+  }
+
+  async function buildPdf() {
+    const p0 = pages[0]
+    const isPdf = p0?.mime === 'application/pdf'
+    const pdfW = 210
+
+    if (isFillablePdf && isPdf && p0?.b64) {
+      const valuesByFieldName = {}
+      fields.forEach(f => {
+        if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id]
+      })
+      const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
+      return { type: 'fillable', bytes: filledBytes }
     }
 
-    if (isPdf && hasCoords) {
-      const pdfjsLib = await import('pdfjs-dist')
-      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
-      const rendered = []
-      for (const p of pages) {
-        const arr = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0))
-        const pdf = await pdfjsLib.getDocument({ data: arr }).promise
-        for (let num = 1; num <= pdf.numPages; num++) {
-          const page = await pdf.getPage(num)
-          const vp = page.getViewport({ scale: 2 })
-          const canvas = document.createElement('canvas')
-          canvas.width = vp.width; canvas.height = vp.height
-          await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise
-          overlayCanvas(canvas, num)
-          rendered.push(canvas)
-        }
-      }
+    const { jsPDF } = await import('jspdf')
+    const rendered = await renderCanvases()
+    if (rendered.length > 0) {
       let doc = null
-      rendered.forEach((canvas, idx) => {
-        const pdfH = (canvas.height / canvas.width) * pdfW
+      rendered.forEach(({ dataUrl, width, height }, idx) => {
+        const pdfH = (height / width) * pdfW
         if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
         else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
-        doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
+        doc.addImage(dataUrl, 'JPEG', 0, 0, pdfW, pdfH)
       })
       return doc
     }
@@ -475,6 +527,29 @@ export default function Home() {
   }
 
   async function exportForm() {
+    const p0 = pages[0]
+    const isPdf = p0?.mime === 'application/pdf'
+
+    // Fillable PDF: pdf-lib places text exactly — no preview needed
+    if (isFillablePdf && isPdf) {
+      const result = await buildPdf()
+      const blob = new Blob([result.bytes], { type: 'application/pdf' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = 'completed_form.pdf'; a.click()
+      URL.revokeObjectURL(url)
+      return
+    }
+
+    // Image or flat PDF with coords: show overlay preview before download
+    const rendered = await renderCanvases()
+    if (rendered.length > 0) {
+      setPreviewUrls(rendered)
+      setShowExportPreview(true)
+      return
+    }
+
+    // renderCanvases failed or no coords — download summary directly
     const result = await buildPdf()
     if (result?.type === 'fillable') {
       const blob = new Blob([result.bytes], { type: 'application/pdf' })
@@ -485,6 +560,21 @@ export default function Home() {
     } else {
       result.save('completed_form.pdf')
     }
+  }
+
+  async function downloadFromPreview() {
+    const { jsPDF } = await import('jspdf')
+    const pdfW = 210
+    let doc = null
+    previewUrls.forEach(({ dataUrl, width, height }, idx) => {
+      const pdfH = (height / width) * pdfW
+      if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
+      else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
+      doc.addImage(dataUrl, 'JPEG', 0, 0, pdfW, pdfH)
+    })
+    doc.save('completed_form.pdf')
+    setShowExportPreview(false)
+    setPreviewUrls([])
   }
 
   async function sendEmail() {
@@ -671,6 +761,32 @@ export default function Home() {
           Email PDF
         </button>
       </div>
+
+      {showExportPreview && (() => {
+        const omitted = fields.filter(f => filledValues[f.id] && (f.x == null || f.y == null))
+        return (
+          <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) { setShowExportPreview(false); setPreviewUrls([]) } }}>
+            <div style={s.previewModal}>
+              <div style={s.previewModalHdr}>Preview — verify field placement</div>
+              {omitted.length > 0
+                ? <div style={{ fontSize: 12, color: '#7a4a00', background: '#FFF8E1', border: '0.5px solid #FFD54F', borderRadius: 6, padding: '7px 10px' }}>
+                    ⚠ {omitted.length} filled field{omitted.length > 1 ? 's' : ''} have no position data and will be <strong>missing</strong> from the downloaded PDF: {omitted.map(f => f.label).join(', ')}
+                  </div>
+                : <div style={s.previewModalSub}>All filled fields are placed. If placement looks good, click Download.</div>
+              }
+              <div style={s.previewImgWrap}>
+                {previewUrls.map(({ dataUrl }, i) => (
+                  <img key={i} src={dataUrl} alt={`Page ${i + 1}`} style={{ width: '100%', borderRadius: 4, display: 'block' }} />
+                ))}
+              </div>
+              <div style={s.modalRow}>
+                <button style={s.modalCancel} onClick={() => { setShowExportPreview(false); setPreviewUrls([]) }}>Cancel</button>
+                <button style={s.previewDlBtn} onClick={downloadFromPreview}>Download PDF</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {showEmailModal && (
         <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) setShowEmailModal(false) }}>
