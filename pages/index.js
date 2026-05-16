@@ -69,10 +69,7 @@ const s = {
 }
 
 export default function Home() {
-  const [file, setFile] = useState(null)
-  const [b64, setB64] = useState(null)
-  const [mime, setMime] = useState(null)
-  const [previewSrc, setPreviewSrc] = useState(null)
+  const [pages, setPages] = useState([])  // [{b64, mime, previewSrc, name}]
   const [scanning, setScanning] = useState(false)
   const [scanned, setScanned] = useState(false)
   const [fields, setFields] = useState([])
@@ -154,35 +151,56 @@ export default function Home() {
     }
   }, [fillingIds])
 
-  function loadFile(f) {
-    const isPDF = f.type === 'application/pdf'
-    const isImg = f.type.startsWith('image/')
-    if (!isPDF && !isImg) { alert('Please upload a JPG, PNG, or PDF.'); return }
-    setMime(f.type)
-    setFile(f)
-    const reader = new FileReader()
-    reader.onload = e => {
-      const data = e.target.result
-      setB64(data.split(',')[1])
-      setPreviewSrc(isImg ? data : null)
-    }
-    reader.readAsDataURL(f)
+  // Prevent browser from opening dropped files as new tabs
+  useEffect(() => {
+    const prevent = e => e.preventDefault()
+    document.addEventListener('dragover', prevent)
+    document.addEventListener('drop', prevent)
+    return () => { document.removeEventListener('dragover', prevent); document.removeEventListener('drop', prevent) }
+  }, [])
+
+  function resetAll(msg = 'Upload your form and hit Scan — I\'ll detect every field, then we\'ll fill them together through conversation.') {
+    setPages([])
     setScanned(false)
     setFields([])
     setFilledValues({})
     setFillingIds({})
     setHistory([])
+    setMessages([{ role: 'ai', text: msg }])
+  }
+
+  function loadFiles(fileList) {
+    const arr = Array.from(fileList).filter(f => f.type === 'application/pdf' || f.type.startsWith('image/'))
+    if (arr.length === 0) { alert('Please upload JPG, PNG, or PDF files.'); return }
+
+    setScanned(false); setFields([]); setFilledValues({}); setFillingIds({}); setHistory([])
     setMessages([{ role: 'ai', text: 'Form loaded! Hit "Scan & detect fields" to read your form.' }])
+
+    const loaded = new Array(arr.length)
+    let done = 0
+    arr.forEach((f, i) => {
+      const reader = new FileReader()
+      reader.onload = e => {
+        const data = e.target.result
+        loaded[i] = { b64: data.split(',')[1], mime: f.type, previewSrc: f.type.startsWith('image/') ? data : null, name: f.name }
+        done++
+        if (done === arr.length) setPages([...loaded])
+      }
+      reader.readAsDataURL(f)
+    })
   }
 
   async function scanForm() {
     setScanning(true)
     setMessages(m => [...m, { role: 'ai', text: 'Reading your form and detecting all fields…' }])
     try {
+      const scanPayload = pages.length === 1
+        ? { base64: pages[0].b64, mediaType: pages[0].mime }
+        : { pages: pages.map(p => ({ base64: p.b64, mediaType: p.mime })) }
       const res = await fetch('/api/scan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base64: b64, mediaType: mime })
+        body: JSON.stringify(scanPayload)
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Scan failed')
@@ -253,7 +271,7 @@ export default function Home() {
         setMessages(m => [...m.filter(x => x.role !== 'typing'), { role: 'ai', text: reply, tags: newFields }])
         speak(reply, true)
       } else {
-        const reply = data.reply || 'Got it, keep going!'
+        const reply = data.reply || "I didn't catch that — could you say that again?"
         setMessages(m => [...m.filter(x => x.role !== 'typing'), { role: 'ai', text: reply }])
         speak(reply, true)
       }
@@ -272,40 +290,50 @@ export default function Home() {
     startListening(true)
   }
 
-  async function exportForm() {
+  async function exportOverlay(p0) {
+    const img = new Image()
+    img.src = p0.previewSrc
+    await new Promise(resolve => { img.onload = resolve })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = img.naturalWidth
+    canvas.height = img.naturalHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0)
+
+    fields.forEach(f => {
+      const val = filledValues[f.id]
+      if (!val || f.x == null || f.y == null) return
+      const fieldH = (f.h / 100) * canvas.height
+      const fontSize = Math.min(18, Math.max(9, fieldH * 0.62))
+      ctx.font = `${fontSize}px Arial, sans-serif`
+      ctx.fillStyle = '#1a1a1a'
+      const x = (f.x / 100) * canvas.width + 3
+      const y = (f.y / 100) * canvas.height + fieldH * 0.75
+      const maxW = (f.w / 100) * canvas.width - 6
+      ctx.fillText(val, x, y, maxW)
+    })
+
+    const { jsPDF } = await import('jspdf')
+    const pdfW = 210
+    const pdfH = (canvas.height / canvas.width) * pdfW
+    const doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
+    doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
+    doc.save('completed_form.pdf')
+  }
+
+  async function exportSummary() {
     const { jsPDF } = await import('jspdf')
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-
-    // Page 1: original form image
-    if (b64 && mime && mime.startsWith('image/')) {
-      const imgData = `data:${mime};base64,${b64}`
-      const fmt = mime.includes('png') ? 'PNG' : 'JPEG'
-      doc.addImage(imgData, fmt, 10, 10, 190, 0)
-    } else {
-      doc.setFontSize(13)
-      doc.setTextColor(150)
-      doc.text('(PDF upload — original form not shown)', 105, 148, { align: 'center' })
-    }
-
-    // Page 2: completed summary
-    doc.addPage()
-    doc.setFontSize(16)
-    doc.setFont(undefined, 'bold')
-    doc.setTextColor(0)
+    doc.setFontSize(16); doc.setFont(undefined, 'bold'); doc.setTextColor(0)
     doc.text('COMPLETED FORM', 105, 20, { align: 'center' })
-    doc.setFontSize(10)
-    doc.setFont(undefined, 'normal')
-    doc.setTextColor(120)
+    doc.setFontSize(10); doc.setFont(undefined, 'normal'); doc.setTextColor(120)
     doc.text(`Exported: ${new Date().toLocaleDateString()}`, 105, 28, { align: 'center' })
-    doc.setDrawColor(200)
-    doc.line(15, 33, 195, 33)
-
-    let y = 43
-    doc.setTextColor(0)
+    doc.setDrawColor(200); doc.line(15, 33, 195, 33)
+    let y = 43; doc.setTextColor(0)
     fields.forEach(f => {
       const val = filledValues[f.id] || '(blank)'
-      doc.setFont(undefined, 'bold')
-      doc.setFontSize(10)
+      doc.setFont(undefined, 'bold'); doc.setFontSize(10)
       doc.text(`${f.label}:`, 15, y)
       doc.setFont(undefined, 'normal')
       const lines = doc.splitTextToSize(val, 115)
@@ -313,8 +341,17 @@ export default function Home() {
       y += Math.max(8, lines.length * 6)
       if (y > 270) { doc.addPage(); y = 20 }
     })
-
     doc.save('completed_form.pdf')
+  }
+
+  async function exportForm() {
+    const p0 = pages[0]
+    const hasCoords = fields.some(f => f.x != null)
+    if (p0?.previewSrc && hasCoords) {
+      await exportOverlay(p0)
+    } else {
+      await exportSummary()
+    }
   }
 
   const filledCount = Object.keys(filledValues).length
@@ -338,37 +375,42 @@ export default function Home() {
             📄 Form upload
           </div>
 
-          {!file ? (
+          {pages.length === 0 ? (
             <div
               style={{ ...s.dropZone, ...(isDrag ? s.dropZoneHover : {}) }}
               onDragOver={e => { e.preventDefault(); setIsDrag(true) }}
               onDragLeave={() => setIsDrag(false)}
-              onDrop={e => { e.preventDefault(); setIsDrag(false); e.dataTransfer.files[0] && loadFile(e.dataTransfer.files[0]) }}
+              onDrop={e => { e.preventDefault(); setIsDrag(false); e.dataTransfer.files.length > 0 && loadFiles(e.dataTransfer.files) }}
               onClick={() => fileRef.current?.click()}
             >
               <div style={{ fontSize: 32, color: '#bbb' }}>☁️</div>
               <p style={s.dropText}>Drop your form here<br />or click to browse</p>
-              <small style={s.dropSub}>Supports JPG · PNG · PDF</small>
+              <small style={s.dropSub}>Supports JPG · PNG · PDF · Multiple pages</small>
             </div>
           ) : (
             <div style={{ ...s.previewBox, margin: 14 }}>
               <div style={s.previewTop}>
                 <span>📎</span>
-                <span style={s.previewFname}>{file.name}</span>
-                <button style={s.rmBtn} onClick={() => { setFile(null); setB64(null); setScanned(false); setFields([]); setFilledValues({}); setHistory([]); setMessages([{ role: 'ai', text: 'Upload your form and hit Scan — I\'ll detect every field, then we\'ll fill them together through conversation.' }]) }}>Remove</button>
+                <span style={s.previewFname}>{pages.length === 1 ? pages[0].name : `${pages.length} pages uploaded`}</span>
+                <button style={s.rmBtn} onClick={() => resetAll()}>Remove</button>
               </div>
-              {previewSrc
-                ? <img src={previewSrc} alt="Form preview" style={{ width: '100%', maxHeight: 220, objectFit: 'contain', background: '#f5f5f3' }} />
-                : <div style={s.pdfThumb}><span style={{ fontSize: 36 }}>📋</span><span>{file.name}</span><span style={{ fontSize: 11, color: '#bbb' }}>Ready to scan</span></div>
-              }
+              {pages.map((p, i) => (
+                <div key={i}>
+                  {pages.length > 1 && <div style={{ fontSize: 10, color: '#999', padding: '3px 10px', background: '#fafafa', borderTop: '0.5px solid #eee' }}>Page {i + 1}</div>}
+                  {p.previewSrc
+                    ? <img src={p.previewSrc} alt={`Page ${i + 1}`} style={{ width: '100%', maxHeight: pages.length > 1 ? 110 : 220, objectFit: 'contain', background: '#f5f5f3' }} />
+                    : <div style={s.pdfThumb}><span style={{ fontSize: 36 }}>📋</span><span>{p.name}</span><span style={{ fontSize: 11, color: '#bbb' }}>Ready to scan</span></div>
+                  }
+                </div>
+              ))}
             </div>
           )}
 
-          <input ref={fileRef} type="file" accept="image/*,.pdf" style={{ display: 'none' }} onChange={e => e.target.files[0] && loadFile(e.target.files[0])} />
+          <input ref={fileRef} type="file" accept="image/*,.pdf" multiple style={{ display: 'none' }} onChange={e => e.target.files.length > 0 && loadFiles(e.target.files)} />
 
           <button
-            style={(!file || scanning) ? s.scanBtnDisabled : s.scanBtn}
-            disabled={!file || scanning}
+            style={(pages.length === 0 || scanning) ? s.scanBtnDisabled : s.scanBtn}
+            disabled={pages.length === 0 || scanning}
             onClick={scanForm}
           >
             {scanning ? '⏳ Scanning…' : scanned ? '✓ Re-scan form' : '🔍 Scan & detect fields'}

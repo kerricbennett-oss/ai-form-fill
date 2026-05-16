@@ -9,32 +9,44 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  const { base64, mediaType } = req.body
-  if (!base64 || !mediaType) return res.status(400).json({ error: 'Missing file data' })
+  const rawPages = req.body.pages
+    ? req.body.pages
+    : [{ base64: req.body.base64, mediaType: req.body.mediaType }]
+
+  if (!rawPages.length || !rawPages[0].base64) return res.status(400).json({ error: 'Missing file data' })
 
   try {
-    const contentBlock = mediaType === 'application/pdf'
-      ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } }
-      : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } }
+    const pageBlocks = rawPages.map(p =>
+      p.mediaType === 'application/pdf'
+        ? { type: 'document', source: { type: 'base64', media_type: p.mediaType, data: p.base64 } }
+        : { type: 'image', source: { type: 'base64', media_type: p.mediaType, data: p.base64 } }
+    )
+
+    const isPDF = rawPages.every(p => p.mediaType === 'application/pdf')
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
-      messages: [{
-        role: 'user',
-        content: [
-          contentBlock,
-          {
-            type: 'text',
-            text: `Carefully examine this form and identify every fillable field.
+      max_tokens: 8192,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            ...pageBlocks,
+            {
+              type: 'text',
+              text: `Carefully examine this form (all pages) and identify every fillable field.
 Include text fields, checkboxes, date fields, dropdowns, signature lines, and table rows.
-Return ONLY a raw JSON array with no markdown, no backticks, no explanation.
-Each item: {"id":"f1","label":"Field name","type":"text"}
+Each item must follow this exact JSON format (no markdown, no backticks, no explanation — raw JSON array only):
+{"id":"f1","label":"Field name","type":"text","x":10.5,"y":23.2,"w":45.0,"h":4.1}
 Types: text, date, checkbox, number, select, signature, textarea
-Be thorough — include every single field visible on the form.`
-          }
-        ]
-      }]
+x, y, w, h = bounding box of the field input area as % of page width/height (left edge, top edge, width, height).
+${isPDF ? 'For PDF documents, estimate coordinates based on the visible layout.' : ''}
+If coordinates cannot be determined, use null: "x":null,"y":null,"w":null,"h":null
+Be thorough — include every field. Start your response with [ and end with ].`
+            }
+          ]
+        }
+      ]
     })
 
     const raw = response.content.map(b => b.text || '').join('').trim()
