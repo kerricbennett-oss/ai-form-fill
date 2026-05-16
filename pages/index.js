@@ -66,6 +66,14 @@ const s = {
   progLbl: { fontSize: 11, color: '#999', whiteSpace: 'nowrap' },
   expBtn: { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '0.5px solid #1D9E75', color: '#1D9E75', background: 'transparent', cursor: 'pointer', fontFamily: 'inherit' },
   expBtnDisabled: { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '0.5px solid #ddd', color: '#bbb', background: 'transparent', cursor: 'not-allowed', fontFamily: 'inherit' },
+  emailBtn: { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '0.5px solid #85B7EB', color: '#0C447C', background: 'transparent', cursor: 'pointer', fontFamily: 'inherit' },
+  overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
+  modal: { background: '#fff', borderRadius: 14, padding: '28px 28px 22px', width: 340, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
+  modalTitle: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
+  modalInput: { border: '0.5px solid #ddd', borderRadius: 8, padding: '8px 12px', fontSize: 13, fontFamily: 'inherit', outline: 'none' },
+  modalRow: { display: 'flex', gap: 8, justifyContent: 'flex-end' },
+  modalCancel: { fontSize: 12, padding: '6px 14px', borderRadius: 8, border: '0.5px solid #ddd', background: '#fff', color: '#666', cursor: 'pointer', fontFamily: 'inherit' },
+  modalSend: { fontSize: 12, padding: '6px 14px', borderRadius: 8, border: 'none', background: '#1D9E75', color: '#fff', cursor: 'pointer', fontFamily: 'inherit' },
 }
 
 export default function Home() {
@@ -85,6 +93,9 @@ export default function Home() {
   const [editingId, setEditingId] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [activeFieldId, setActiveFieldId] = useState(null)
+  const [showEmailModal, setShowEmailModal] = useState(false)
+  const [emailAddr, setEmailAddr] = useState('')
+  const [emailSending, setEmailSending] = useState(false)
   const msgsRef = useRef(null)
   const fileRef = useRef(null)
   const recogRef = useRef(null)
@@ -167,6 +178,9 @@ export default function Home() {
     setFillingIds({})
     setHistory([])
     setMessages([{ role: 'ai', text: msg }])
+    setActiveFieldId(null)
+    setEditingId(null)
+    setEditValue('')
   }
 
   function loadFiles(fileList) {
@@ -237,7 +251,6 @@ export default function Home() {
       setMessages(m => m.filter(x => x.role !== 'typing'))
 
       const validIds = new Set(fields.map(f => f.id))
-      console.log('API returned extracted:', JSON.stringify(data.extracted))
       const extracted = Object.fromEntries(
         Object.entries(data.extracted || {})
           .filter(([id, val]) => validIds.has(id) && val !== null && val !== undefined && val !== '')
@@ -247,7 +260,6 @@ export default function Home() {
             return [id, String(val)]
           })
       )
-      console.log('After filter extracted:', JSON.stringify(extracted))
 
       // highlight the field being asked about next
       if (data.askingId && fields.find(f => f.id === data.askingId)) {
@@ -290,40 +302,78 @@ export default function Home() {
     startListening(true)
   }
 
-  async function exportOverlay(p0) {
-    const img = new Image()
-    img.src = p0.previewSrc
-    await new Promise(resolve => { img.onload = resolve })
-
-    const canvas = document.createElement('canvas')
-    canvas.width = img.naturalWidth
-    canvas.height = img.naturalHeight
+  function overlayCanvas(canvas, pageNum) {
     const ctx = canvas.getContext('2d')
-    ctx.drawImage(img, 0, 0)
-
     fields.forEach(f => {
+      if ((f.page || 1) !== pageNum) return
       const val = filledValues[f.id]
       if (!val || f.x == null || f.y == null) return
       const fieldH = (f.h / 100) * canvas.height
       const fontSize = Math.min(18, Math.max(9, fieldH * 0.62))
       ctx.font = `${fontSize}px Arial, sans-serif`
       ctx.fillStyle = '#1a1a1a'
-      const x = (f.x / 100) * canvas.width + 3
-      const y = (f.y / 100) * canvas.height + fieldH * 0.75
-      const maxW = (f.w / 100) * canvas.width - 6
-      ctx.fillText(val, x, y, maxW)
+      ctx.fillText(val, (f.x / 100) * canvas.width + 3, (f.y / 100) * canvas.height + fieldH * 0.75, (f.w / 100) * canvas.width - 6)
     })
-
-    const { jsPDF } = await import('jspdf')
-    const pdfW = 210
-    const pdfH = (canvas.height / canvas.width) * pdfW
-    const doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
-    doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
-    doc.save('completed_form.pdf')
   }
 
-  async function exportSummary() {
+  async function buildPdf() {
+    const p0 = pages[0]
+    const hasCoords = fields.some(f => f.x != null)
+    const isPdf = p0?.mime === 'application/pdf'
     const { jsPDF } = await import('jspdf')
+    const pdfW = 210
+
+    if (!isPdf && p0?.previewSrc && hasCoords) {
+      let doc = null
+      for (let i = 0; i < pages.length; i++) {
+        const p = pages[i]
+        if (!p.previewSrc) continue
+        const img = new Image()
+        img.src = p.previewSrc
+        await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject })
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth; canvas.height = img.naturalHeight
+        canvas.getContext('2d').drawImage(img, 0, 0)
+        overlayCanvas(canvas, i + 1)
+        const pdfH = (canvas.height / canvas.width) * pdfW
+        if (!doc) {
+          doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
+        } else {
+          doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
+        }
+        doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
+      }
+      return doc
+    }
+
+    if (isPdf && hasCoords) {
+      const pdfjsLib = await import('pdfjs-dist')
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+      const rendered = []
+      for (const p of pages) {
+        const arr = Uint8Array.from(atob(p.b64), c => c.charCodeAt(0))
+        const pdf = await pdfjsLib.getDocument({ data: arr }).promise
+        for (let num = 1; num <= pdf.numPages; num++) {
+          const page = await pdf.getPage(num)
+          const vp = page.getViewport({ scale: 2 })
+          const canvas = document.createElement('canvas')
+          canvas.width = vp.width; canvas.height = vp.height
+          await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise
+          overlayCanvas(canvas, num)
+          rendered.push(canvas)
+        }
+      }
+      let doc = null
+      rendered.forEach((canvas, idx) => {
+        const pdfH = (canvas.height / canvas.width) * pdfW
+        if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
+        else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
+        doc.addImage(canvas.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, pdfW, pdfH)
+      })
+      return doc
+    }
+
+    // Summary fallback
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
     doc.setFontSize(16); doc.setFont(undefined, 'bold'); doc.setTextColor(0)
     doc.text('COMPLETED FORM', 105, 20, { align: 'center' })
@@ -341,17 +391,34 @@ export default function Home() {
       y += Math.max(8, lines.length * 6)
       if (y > 270) { doc.addPage(); y = 20 }
     })
-    doc.save('completed_form.pdf')
+    return doc
   }
 
   async function exportForm() {
-    const p0 = pages[0]
-    const hasCoords = fields.some(f => f.x != null)
-    if (p0?.previewSrc && hasCoords) {
-      await exportOverlay(p0)
-    } else {
-      await exportSummary()
+    const doc = await buildPdf()
+    doc.save('completed_form.pdf')
+  }
+
+  async function sendEmail() {
+    if (!emailAddr.trim()) return
+    setEmailSending(true)
+    try {
+      const doc = await buildPdf()
+      const pdfBase64 = doc.output('datauristring').split(',')[1]
+      const res = await fetch('/api/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: emailAddr.trim(), pdfBase64 })
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Send failed')
+      setShowEmailModal(false)
+      setEmailAddr('')
+      setMessages(m => [...m, { role: 'ai', text: `Form sent to ${emailAddr.trim()}!` }])
+    } catch (err) {
+      alert(`Email failed: ${err.message}`)
     }
+    setEmailSending(false)
   }
 
   const filledCount = Object.keys(filledValues).length
@@ -368,7 +435,7 @@ export default function Home() {
         {!scanning && !scanned && <span style={s.pill}>Upload a form to start</span>}
       </div>
 
-      <div style={s.main}>
+      <div style={s.main} className="main-grid">
         {/* LEFT */}
         <div style={s.card}>
           <div style={s.cardHdr}>
@@ -426,7 +493,7 @@ export default function Home() {
             </div>
             {fields.length === 0
               ? <div style={s.fieldsEmpty}>Scan a form to detect its fields</div>
-              : <div ref={fieldsScrollRef} style={s.fieldsScroll}>
+              : <div ref={fieldsScrollRef} style={s.fieldsScroll} className="fields-scroll">
                   {fields.map(f => (
                     <div key={f.id} ref={el => { if (el) fieldItemRefs.current[f.id] = el; else delete fieldItemRefs.current[f.id] }} style={activeFieldId === f.id ? s.fiActive : s.fi}>
                       <span style={s.fiLbl}>{f.label}</span>
@@ -453,7 +520,7 @@ export default function Home() {
             }
           </div>
 
-          <div style={s.chatCard}>
+          <div style={s.chatCard} className="chat-card">
             <div style={s.cardHdr}>💬 Fill by conversation</div>
             <div ref={msgsRef} style={s.msgs}>
               {messages.map((m, i) => {
@@ -501,19 +568,51 @@ export default function Home() {
         </div>
       </div>
 
-      <div style={s.bottomBar}>
+      <div style={s.bottomBar} className="bottom-bar">
         <div style={s.progTrack}><div style={{ ...s.progFill, width: pct + '%' }} /></div>
         <span style={s.progLbl}>{pct}% complete</span>
         <button style={filledCount === 0 ? s.expBtnDisabled : s.expBtn} onClick={exportForm} disabled={filledCount === 0}>
           Export as PDF
         </button>
+        <button style={filledCount === 0 ? s.expBtnDisabled : s.emailBtn} onClick={() => setShowEmailModal(true)} disabled={filledCount === 0}>
+          Email PDF
+        </button>
       </div>
+
+      {showEmailModal && (
+        <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) setShowEmailModal(false) }}>
+          <div style={s.modal}>
+            <div style={s.modalTitle}>Email completed form</div>
+            <input
+              style={s.modalInput}
+              type="email"
+              placeholder="your@email.com"
+              value={emailAddr}
+              onChange={e => setEmailAddr(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') sendEmail() }}
+              autoFocus
+            />
+            <div style={s.modalRow}>
+              <button style={s.modalCancel} onClick={() => { setShowEmailModal(false); setEmailAddr('') }}>Cancel</button>
+              <button style={s.modalSend} onClick={sendEmail} disabled={emailSending}>
+                {emailSending ? 'Sending…' : 'Send'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes bounce { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-4px)} }
         button:hover { opacity: 0.88; }
         textarea:focus { border-color: #1D9E75 !important; }
         ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+        @media (max-width: 768px) {
+          .main-grid { grid-template-columns: 1fr !important; }
+          .fields-scroll { max-height: 240px !important; }
+          .chat-card { min-height: 320px; }
+          .bottom-bar { flex-wrap: wrap; gap: 8px; }
+        }
       `}</style>
     </div>
   )
