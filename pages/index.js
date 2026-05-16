@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { detectFillableFields, fillPdf } from '../lib/pdfFields'
 
 const s = {
   app: { display: 'flex', flexDirection: 'column', height: '100vh', maxWidth: 1100, margin: '0 auto', padding: '16px', gap: 12 },
@@ -96,6 +97,9 @@ export default function Home() {
   const [showEmailModal, setShowEmailModal] = useState(false)
   const [emailAddr, setEmailAddr] = useState('')
   const [emailSending, setEmailSending] = useState(false)
+  const [isFillablePdf, setIsFillablePdf] = useState(false)
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewCanvas, setPreviewCanvas] = useState(null)
   const msgsRef = useRef(null)
   const fileRef = useRef(null)
   const recogRef = useRef(null)
@@ -188,17 +192,31 @@ export default function Home() {
     if (arr.length === 0) { alert('Please upload JPG, PNG, or PDF files.'); return }
 
     setScanned(false); setFields([]); setFilledValues({}); setFillingIds({}); setHistory([])
+    setIsFillablePdf(false)
     setMessages([{ role: 'ai', text: 'Form loaded! Hit "Scan & detect fields" to read your form.' }])
 
     const loaded = new Array(arr.length)
     let done = 0
     arr.forEach((f, i) => {
       const reader = new FileReader()
-      reader.onload = e => {
+      reader.onload = async e => {
         const data = e.target.result
-        loaded[i] = { b64: data.split(',')[1], mime: f.type, previewSrc: f.type.startsWith('image/') ? data : null, name: f.name }
+        const b64 = data.split(',')[1]
+        loaded[i] = { b64, mime: f.type, previewSrc: f.type.startsWith('image/') ? data : null, name: f.name }
         done++
-        if (done === arr.length) setPages([...loaded])
+        if (done === arr.length) {
+          setPages([...loaded])
+          // Detect fillable PDF fields
+          if (f.type === 'application/pdf') {
+            try {
+              const detected = await detectFillableFields(b64)
+              if (detected && detected.length > 0) {
+                setIsFillablePdf(true)
+                setMessages([{ role: 'ai', text: `Fillable PDF detected with ${detected.length} form fields. Hit "Scan & detect fields" to load them.` }])
+              }
+            } catch (_) { /* not fillable, continue normally */ }
+          }
+        }
       }
       reader.readAsDataURL(f)
     })
@@ -208,21 +226,55 @@ export default function Home() {
     setScanning(true)
     setMessages(m => [...m, { role: 'ai', text: 'Reading your form and detecting all fields…' }])
     try {
-      const scanPayload = pages.length === 1
-        ? { base64: pages[0].b64, mediaType: pages[0].mime }
-        : { pages: pages.map(p => ({ base64: p.b64, mediaType: p.mime })) }
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(scanPayload)
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Scan failed')
-      setFields(data.fields)
+      let detectedFields = null
+
+      // For fillable PDFs: use pdf-lib exact geometry, skip Claude coordinate guessing
+      if (isFillablePdf && pages[0]?.mime === 'application/pdf') {
+        detectedFields = await detectFillableFields(pages[0].b64)
+      }
+
+      if (detectedFields && detectedFields.length > 0) {
+        // Ask Claude to give human-readable labels for the pdf field names
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            base64: pages[0].b64,
+            mediaType: pages[0].mime,
+            fillableFieldNames: detectedFields.map(f => f.pdfFieldName)
+          })
+        })
+        const data = await res.json()
+        if (res.ok && data.fields) {
+          // Merge Claude's labels onto pdf-lib's exact coordinates
+          const labelMap = {}
+          data.fields.forEach(f => { labelMap[f.id] = f.label })
+          detectedFields = detectedFields.map(f => ({
+            ...f,
+            label: labelMap[f.pdfFieldName] || f.pdfFieldName
+          }))
+        }
+        setFields(detectedFields)
+      } else {
+        // Flat PDF or image: standard Claude coordinate scan
+        const scanPayload = pages.length === 1
+          ? { base64: pages[0].b64, mediaType: pages[0].mime }
+          : { pages: pages.map(p => ({ base64: p.b64, mediaType: p.mime })) }
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(scanPayload)
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Scan failed')
+        setFields(data.fields)
+      }
+
       setScanned(true)
-      const sample = data.fields.slice(0, 3).map(f => f.label).join(', ')
-      const more = data.fields.length > 3 ? ` and ${data.fields.length - 3} more` : ''
-      const scanMsg = `Found ${data.fields.length} fields: ${sample}${more}. Just talk naturally and I'll fill them in as you go!`
+      const allFields = detectedFields || []
+      const sample = allFields.slice(0, 3).map(f => f.label).join(', ')
+      const more = allFields.length > 3 ? ` and ${allFields.length - 3} more` : ''
+      const scanMsg = `Found ${allFields.length} fields: ${sample}${more}. Just talk naturally and I'll fill them in as you go!`
       setMessages(m => [...m, { role: 'ai', text: scanMsg }])
       speak(scanMsg)
     } catch (err) {
@@ -304,15 +356,32 @@ export default function Home() {
 
   function overlayCanvas(canvas, pageNum) {
     const ctx = canvas.getContext('2d')
+    // Fixed font size relative to canvas width — consistent across all field types
+    const fontSize = Math.round(canvas.width * 0.009)
     fields.forEach(f => {
       if ((f.page || 1) !== pageNum) return
       const val = filledValues[f.id]
       if (!val || f.x == null || f.y == null) return
+      const fx = (f.x / 100) * canvas.width
+      const fy = (f.y / 100) * canvas.height
+      const fw = (f.w / 100) * canvas.width
       const fieldH = (f.h / 100) * canvas.height
-      const fontSize = Math.min(18, Math.max(9, fieldH * 0.62))
-      ctx.font = `${fontSize}px Arial, sans-serif`
-      ctx.fillStyle = '#1a1a1a'
-      ctx.fillText(val, (f.x / 100) * canvas.width + 3, (f.y / 100) * canvas.height + fieldH * 0.75, (f.w / 100) * canvas.width - 6)
+
+      if (f.type === 'checkbox') {
+        const checked = /yes|true|x/i.test(val)
+        if (!checked) return
+        const checkSize = Math.round(canvas.width * 0.014)
+        ctx.fillStyle = '#000000'
+        ctx.strokeStyle = '#000000'
+        ctx.lineWidth = checkSize * 0.12
+        ctx.font = `bold ${checkSize}px Arial, sans-serif`
+        ctx.fillText('✔', fx + 2, fy + checkSize * 1.1)
+        ctx.strokeText('✔', fx + 2, fy + checkSize * 1.1)
+      } else {
+        ctx.fillStyle = '#111111'
+        ctx.font = `${fontSize}px Arial, sans-serif`
+        ctx.fillText(val, fx + 2, fy + fontSize * 1.1, fw - 4)
+      }
     })
   }
 
@@ -320,8 +389,19 @@ export default function Home() {
     const p0 = pages[0]
     const hasCoords = fields.some(f => f.x != null)
     const isPdf = p0?.mime === 'application/pdf'
-    const { jsPDF } = await import('jspdf')
     const pdfW = 210
+
+    // Fillable PDF: use pdf-lib to fill actual form fields — 100% accurate placement
+    if (isFillablePdf && isPdf && p0?.b64) {
+      const valuesByFieldName = {}
+      fields.forEach(f => {
+        if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id]
+      })
+      const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
+      return { type: 'fillable', bytes: filledBytes }
+    }
+
+    const { jsPDF } = await import('jspdf')
 
     if (!isPdf && p0?.previewSrc && hasCoords) {
       let doc = null
@@ -395,16 +475,29 @@ export default function Home() {
   }
 
   async function exportForm() {
-    const doc = await buildPdf()
-    doc.save('completed_form.pdf')
+    const result = await buildPdf()
+    if (result?.type === 'fillable') {
+      const blob = new Blob([result.bytes], { type: 'application/pdf' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url; a.download = 'completed_form.pdf'; a.click()
+      URL.revokeObjectURL(url)
+    } else {
+      result.save('completed_form.pdf')
+    }
   }
 
   async function sendEmail() {
     if (!emailAddr.trim()) return
     setEmailSending(true)
     try {
-      const doc = await buildPdf()
-      const pdfBase64 = doc.output('datauristring').split(',')[1]
+      const result = await buildPdf()
+      let pdfBase64
+      if (result?.type === 'fillable') {
+        pdfBase64 = btoa(String.fromCharCode(...result.bytes))
+      } else {
+        pdfBase64 = result.output('datauristring').split(',')[1]
+      }
       const res = await fetch('/api/email', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

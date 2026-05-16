@@ -15,6 +15,8 @@ export default async function handler(req, res) {
 
   if (!rawPages.length || !rawPages[0].base64) return res.status(400).json({ error: 'Missing file data' })
 
+  const fillableFieldNames = req.body.fillableFieldNames || null
+
   try {
     const pageBlocks = rawPages.map(p =>
       p.mediaType === 'application/pdf'
@@ -24,17 +26,15 @@ export default async function handler(req, res) {
 
     const isPDF = rawPages.every(p => p.mediaType === 'application/pdf')
 
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 8192,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            ...pageBlocks,
-            {
-              type: 'text',
-              text: `Carefully examine this form (all pages) and identify every fillable field.
+    // Label-mapping mode: fillable PDF — Claude maps field names to human-readable labels only
+    const promptText = fillableFieldNames
+      ? `This PDF has fillable form fields with these internal names: ${fillableFieldNames.join(', ')}.
+Look at the form and return a JSON array mapping each field name to a human-readable label.
+Format (raw JSON array only, no markdown):
+{"id":"<exact field name>","label":"Human Readable Label","type":"text"}
+Types: text, date, checkbox, number, select, signature, textarea
+Return one entry per field name. Start with [ and end with ].`
+      : `Carefully examine this form (all pages) and identify every fillable field.
 Include text fields, checkboxes, date fields, dropdowns, signature lines, and table rows.
 Each item must follow this exact JSON format (no markdown, no backticks, no explanation — raw JSON array only):
 {"id":"f1","label":"Field name","type":"text","page":1,"x":10.5,"y":23.2,"w":45.0,"h":4.1}
@@ -44,7 +44,16 @@ x, y, w, h = bounding box of the field input area as % of that page's width/heig
 ${isPDF ? 'For PDF documents, estimate coordinates based on the visible layout.' : ''}
 If coordinates cannot be determined, use null: "x":null,"y":null,"w":null,"h":null
 Be thorough — include every field. Start your response with [ and end with ].`
-            }
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8192,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            ...pageBlocks,
+            { type: 'text', text: promptText }
           ]
         }
       ]
