@@ -37,9 +37,10 @@ export default async function handler(req, res) {
               text: `Carefully examine this form (all pages) and identify every fillable field.
 Include text fields, checkboxes, date fields, dropdowns, signature lines, and table rows.
 Each item must follow this exact JSON format (no markdown, no backticks, no explanation — raw JSON array only):
-{"id":"f1","label":"Field name","type":"text","x":10.5,"y":23.2,"w":45.0,"h":4.1}
+{"id":"f1","label":"Field name","type":"text","page":1,"x":10.5,"y":23.2,"w":45.0,"h":4.1}
 Types: text, date, checkbox, number, select, signature, textarea
-x, y, w, h = bounding box of the field input area as % of page width/height (left edge, top edge, width, height).
+page = 1-based page number where the field appears.
+x, y, w, h = bounding box of the field input area as % of that page's width/height (left edge, top edge, width, height).
 ${isPDF ? 'For PDF documents, estimate coordinates based on the visible layout.' : ''}
 If coordinates cannot be determined, use null: "x":null,"y":null,"w":null,"h":null
 Be thorough — include every field. Start your response with [ and end with ].`
