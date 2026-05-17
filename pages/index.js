@@ -192,6 +192,8 @@ export default function Home() {
     setActiveFieldId(null)
     setEditingId(null)
     setEditValue('')
+    setShowExportPreview(false)
+    setRawPageUrls([])
   }
 
   function loadFiles(fileList) {
@@ -199,6 +201,7 @@ export default function Home() {
     if (arr.length === 0) { alert('Please upload JPG, PNG, or PDF files.'); return }
 
     setScanned(false); setFields([]); setFilledValues({}); setFillingIds({}); setHistory([])
+    setShowExportPreview(false); setRawPageUrls([])
     setIsFillablePdf(false)
     setMessages([{ role: 'ai', text: 'Form loaded! Hit "Scan & detect fields" to read your form.' }])
 
@@ -288,8 +291,10 @@ export default function Home() {
         })
         const data = await res.json()
         if (!res.ok) throw new Error(data.error || 'Scan failed')
-        setFields(data.fields)
-        scannedFields = data.fields
+
+        const snappedFields = snapFieldsToBoxes(data.fields, detectedBoxes)
+        setFields(snappedFields)
+        scannedFields = snappedFields
       }
 
       setScanned(true)
@@ -488,6 +493,7 @@ export default function Home() {
         }
       } catch (err) {
         console.error('PDF render failed:', err)
+        throw err
       }
     }
     return results
@@ -518,34 +524,52 @@ export default function Home() {
     return boxes
   }
 
-  async function buildPdf() {
-    const p0 = pages[0]
-    const isPdf = p0?.mime === 'application/pdf'
-    const pdfW = 210
+  function snapFieldsToBoxes(rawFields, detectedBoxes) {
+    if (!detectedBoxes.length) return rawFields
+    return rawFields.map(f => {
+      const fx = (f.x ?? 0) + (f.w ?? 0) / 2
+      const fy = (f.y ?? 0) + (f.h ?? 0) / 2
+      const pageBxs = detectedBoxes.filter(b => b.page === f.page && b.confidence >= 0.4)
 
-    if (isFillablePdf && isPdf && p0?.b64) {
-      const valuesByFieldName = {}
-      fields.forEach(f => {
-        if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id]
-      })
-      const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
-      return { type: 'fillable', bytes: filledBytes }
-    }
+      // Tier 1: Claude's centroid falls inside a detected box
+      const containing = pageBxs.filter(b => fx >= b.x && fx <= b.x + b.w && fy >= b.y && fy <= b.y + b.h)
+      if (containing.length > 0) {
+        const best = containing.reduce((a, b) => b.confidence > a.confidence ? b : a)
+        return { ...f, x: best.x, y: best.y, w: best.w, h: best.h, confidence: best.confidence, needsReview: false }
+      }
 
+      // Tier 2: nearest box within min(w,h)/4, confidence >= 0.4
+      let best = null, bestDist = Infinity
+      for (const b of pageBxs) {
+        const dist = Math.hypot(fx - (b.x + b.w / 2), fy - (b.y + b.h / 2))
+        if (dist < bestDist) { bestDist = dist; best = b }
+      }
+      if (best && bestDist < Math.min(best.w, best.h) / 4) {
+        return { ...f, x: best.x, y: best.y, w: best.w, h: best.h, confidence: best.confidence, needsReview: false }
+      }
+
+      // Tier 3: no confident match — flag for review
+      return { ...f, x: null, y: null, w: null, h: null, needsReview: true }
+    })
+  }
+
+  async function buildVisualPdf() {
     const { jsPDF } = await import('jspdf')
+    const pdfW = 210
     const rendered = await renderCanvases()
-    if (rendered.length > 0) {
-      let doc = null
-      rendered.forEach(({ dataUrl, width, height }, idx) => {
-        const pdfH = (height / width) * pdfW
-        if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
-        else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
-        doc.addImage(dataUrl, 'JPEG', 0, 0, pdfW, pdfH)
-      })
-      return doc
-    }
+    if (!rendered.length) throw new Error('Could not render pages for visual export.')
+    let doc = null
+    rendered.forEach(({ dataUrl, width, height }, idx) => {
+      const pdfH = (height / width) * pdfW
+      if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
+      else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
+      doc.addImage(dataUrl, 'JPEG', 0, 0, pdfW, pdfH)
+    })
+    return doc
+  }
 
-    // Summary fallback
+  async function buildSummaryPdf() {
+    const { jsPDF } = await import('jspdf')
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
     doc.setFontSize(16); doc.setFont(undefined, 'bold'); doc.setTextColor(0)
     doc.text('COMPLETED FORM', 105, 20, { align: 'center' })
@@ -570,10 +594,12 @@ export default function Home() {
     const p0 = pages[0]
     const isPdf = p0?.mime === 'application/pdf'
 
-    // Fillable PDF: exact fill, no preview needed
-    if (isFillablePdf && isPdf) {
-      const result = await buildPdf()
-      const blob = new Blob([result.bytes], { type: 'application/pdf' })
+    // Fillable PDF: exact fill via pdf-lib, no preview needed
+    if (isFillablePdf && isPdf && p0?.b64) {
+      const valuesByFieldName = {}
+      fields.forEach(f => { if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id] })
+      const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
+      const blob = new Blob([filledBytes], { type: 'application/pdf' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url; a.download = 'completed_form.pdf'; a.click()
@@ -581,36 +607,55 @@ export default function Home() {
       return
     }
 
-    // Flat PDF / image: show interactive preview
-    if (fields.some(f => f.x != null)) {
-      const raw = await renderRawPages()
-      if (raw.length > 0) {
-        setRawPageUrls(raw)
-        setShowExportPreview(true)
-        return
-      }
+    // Block export if any field needs review — open preview so user can correct or override
+    if (fields.some(f => f.needsReview)) {
+      try {
+        const raw = await renderRawPages()
+        if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
+      } catch (err) { console.error('Render failed:', err) }
     }
 
-    // No coords at all: summary PDF
-    const result = await buildPdf()
-    result.save('completed_form.pdf')
+    // Flat PDF / image with coords: show interactive preview
+    if (fields.some(f => f.x != null)) {
+      try {
+        const raw = await renderRawPages()
+        if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
+      } catch (err) { console.error('Render failed:', err) }
+    }
+
+    // No coords or render failed: summary PDF
+    const doc = await buildSummaryPdf()
+    doc.save('completed_form.pdf')
   }
 
   async function downloadFromPreview() {
-    const { jsPDF } = await import('jspdf')
-    const pdfW = 210
-    const rendered = await renderCanvases()
-    if (!rendered.length) return
-    let doc = null
-    rendered.forEach(({ dataUrl, width, height }, idx) => {
-      const pdfH = (height / width) * pdfW
-      if (idx === 0) doc = new jsPDF({ orientation: pdfH > pdfW ? 'portrait' : 'landscape', unit: 'mm', format: [pdfW, pdfH] })
-      else doc.addPage([pdfW, pdfH], pdfH > pdfW ? 'portrait' : 'landscape')
-      doc.addImage(dataUrl, 'JPEG', 0, 0, pdfW, pdfH)
-    })
-    doc.save('completed_form.pdf')
-    setShowExportPreview(false)
-    setRawPageUrls([])
+    try {
+      const doc = await buildVisualPdf()
+      doc.save('completed_form.pdf')
+    } catch (err) {
+      alert(`Export failed: ${err.message}`)
+    } finally {
+      setShowExportPreview(false)
+      setRawPageUrls([])
+    }
+  }
+
+  async function exportAnyway() {
+    setFields(prev => prev.map(f => ({ ...f, needsReview: false })))
+    try {
+      const doc = await buildVisualPdf()
+      doc.save('completed_form.pdf')
+    } catch (err) {
+      const doc = await buildSummaryPdf()
+      doc.save('completed_form.pdf')
+    } finally {
+      setShowExportPreview(false)
+      setRawPageUrls([])
+    }
+  }
+
+  function clientXY(e) {
+    return e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY }
   }
 
   function handleDragStart(e, fieldId) {
@@ -618,14 +663,16 @@ export default function Home() {
     const container = e.currentTarget.parentElement
     const rect = container.getBoundingClientRect()
     const f = fields.find(f => f.id === fieldId)
-    dragRef.current = { fieldId, containerRect: rect, startMouseX: e.clientX, startMouseY: e.clientY, startFx: f.x, startFy: f.y }
+    const { x, y } = clientXY(e)
+    dragRef.current = { fieldId, containerRect: rect, startMouseX: x, startMouseY: y, startFx: f.x, startFy: f.y }
   }
 
   function handleDragMove(e) {
     if (!dragRef.current) return
     const { fieldId, containerRect, startMouseX, startMouseY, startFx, startFy } = dragRef.current
-    const dx = ((e.clientX - startMouseX) / containerRect.width) * 100
-    const dy = ((e.clientY - startMouseY) / containerRect.height) * 100
+    const { x, y } = clientXY(e)
+    const dx = ((x - startMouseX) / containerRect.width) * 100
+    const dy = ((y - startMouseY) / containerRect.height) * 100
     setFields(prev => prev.map(f => f.id === fieldId ? { ...f, x: Math.max(0, startFx + dx), y: Math.max(0, startFy + dy) } : f))
   }
 
@@ -633,14 +680,23 @@ export default function Home() {
 
   async function sendEmail() {
     if (!emailAddr.trim()) return
+    if (fields.some(f => f.needsReview)) {
+      alert('Some fields still need review before sending. Export the form first to correct placement.')
+      return
+    }
     setEmailSending(true)
     try {
-      const result = await buildPdf()
+      const p0 = pages[0]
+      const isPdf = p0?.mime === 'application/pdf'
       let pdfBase64
-      if (result?.type === 'fillable') {
-        pdfBase64 = btoa(String.fromCharCode(...result.bytes))
+      if (isFillablePdf && isPdf && p0?.b64) {
+        const valuesByFieldName = {}
+        fields.forEach(f => { if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id] })
+        const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
+        pdfBase64 = btoa(String.fromCharCode(...filledBytes))
       } else {
-        pdfBase64 = result.output('datauristring').split(',')[1]
+        const doc = await buildVisualPdf()
+        pdfBase64 = doc.output('datauristring').split(',')[1]
       }
       const res = await fetch('/api/email', {
         method: 'POST',
@@ -817,31 +873,38 @@ export default function Home() {
       </div>
 
       {showExportPreview && (() => {
-        const omitted = fields.filter(f => filledValues[f.id] && (f.x == null || f.y == null))
+        const needsReviewFields = fields.filter(f => f.needsReview && filledValues[f.id])
+        const omitted = fields.filter(f => filledValues[f.id] && !f.needsReview && (f.x == null || f.y == null))
         const lowConf = fields.filter(f => filledValues[f.id] && f.x != null && f.confidence != null && f.confidence < 0.5)
-        const isDesktop = typeof window !== 'undefined' && window.innerWidth > 768
         const warnStyle = { fontSize: 12, color: '#7a4a00', background: '#FFF8E1', border: '0.5px solid #FFD54F', borderRadius: 6, padding: '7px 10px' }
         return (
           <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) { setShowExportPreview(false); setRawPageUrls([]) } }}>
             <div style={s.previewModal}>
               <div style={s.previewModalHdr}>Preview — verify field placement</div>
+              {needsReviewFields.length > 0 && (
+                <div style={{ ...warnStyle, color: '#7a0000', background: '#FFF0F0', border: '0.5px solid #FF8A80' }}>
+                  ⚠ {needsReviewFields.length} field{needsReviewFields.length > 1 ? 's' : ''} could not be placed — drag to position or tap "Export anyway": {needsReviewFields.map(f => f.label).join(', ')}
+                </div>
+              )}
               {omitted.length > 0 && (
-                <div style={warnStyle}>
+                <div style={{ ...warnStyle, marginTop: needsReviewFields.length > 0 ? 4 : 0 }}>
                   ⚠ {omitted.length} filled field{omitted.length > 1 ? 's' : ''} have no position data and will be <strong>missing</strong> from the PDF: {omitted.map(f => f.label).join(', ')}
                 </div>
               )}
               {lowConf.length > 0 && (
-                <div style={{ ...warnStyle, marginTop: omitted.length > 0 ? 4 : 0 }}>
-                  ⚠ {lowConf.length} field{lowConf.length > 1 ? 's' : ''} have low-confidence placement{isDesktop ? ' — drag boxes to reposition' : ''}: {lowConf.map(f => f.label).join(', ')}
+                <div style={{ ...warnStyle, marginTop: omitted.length > 0 || needsReviewFields.length > 0 ? 4 : 0 }}>
+                  ⚠ {lowConf.length} field{lowConf.length > 1 ? 's' : ''} have low-confidence placement — drag boxes to reposition: {lowConf.map(f => f.label).join(', ')}
                 </div>
               )}
-              {omitted.length === 0 && lowConf.length === 0 && (
-                <div style={s.previewModalSub}>All fields placed.{isDesktop ? ' Drag any box to reposition.' : ''} Click Download when ready.</div>
+              {needsReviewFields.length === 0 && omitted.length === 0 && lowConf.length === 0 && (
+                <div style={s.previewModalSub}>All fields placed. Drag any box to reposition. Click Download when ready.</div>
               )}
               <div style={s.previewImgWrap}
-                onMouseMove={isDesktop ? handleDragMove : undefined}
-                onMouseUp={isDesktop ? handleDragEnd : undefined}
-                onMouseLeave={isDesktop ? handleDragEnd : undefined}
+                onMouseMove={handleDragMove}
+                onMouseUp={handleDragEnd}
+                onMouseLeave={handleDragEnd}
+                onTouchMove={e => { e.preventDefault(); handleDragMove(e) }}
+                onTouchEnd={handleDragEnd}
               >
                 {rawPageUrls.map(({ dataUrl }, pageIdx) => {
                   const pageNum = pageIdx + 1
@@ -859,11 +922,12 @@ export default function Home() {
                             width: `${f.w}%`, height: `${f.h}%`,
                             border: `1.5px solid ${f.confidence != null && f.confidence < 0.5 ? '#FFB300' : '#1D9E75'}`,
                             background: 'rgba(29,158,117,0.10)',
-                            cursor: isDesktop ? 'move' : 'default',
+                            cursor: 'move',
                             overflow: 'hidden', display: 'flex', alignItems: 'center',
-                            padding: '0 2px', boxSizing: 'border-box', userSelect: 'none',
+                            padding: '0 2px', boxSizing: 'border-box', userSelect: 'none', touchAction: 'none',
                           }}
-                          onMouseDown={isDesktop ? (e) => handleDragStart(e, f.id) : undefined}
+                          onMouseDown={e => handleDragStart(e, f.id)}
+                          onTouchStart={e => handleDragStart(e, f.id)}
                         >
                           <span style={{ fontSize: '0.7vw', color: '#085041', overflow: 'hidden', whiteSpace: 'nowrap', maxWidth: '100%' }}>
                             {f.type === 'checkbox' ? (/yes|true|x/i.test(filledValues[f.id]) ? '✔' : '') : filledValues[f.id]}
@@ -876,6 +940,9 @@ export default function Home() {
               </div>
               <div style={s.modalRow}>
                 <button style={s.modalCancel} onClick={() => { setShowExportPreview(false); setRawPageUrls([]) }}>Cancel</button>
+                {needsReviewFields.length > 0 && (
+                  <button style={{ ...s.modalCancel, color: '#7a4a00', borderColor: '#FFD54F' }} onClick={exportAnyway}>Export anyway</button>
+                )}
                 <button style={s.previewDlBtn} onClick={downloadFromPreview}>Download PDF</button>
               </div>
             </div>
