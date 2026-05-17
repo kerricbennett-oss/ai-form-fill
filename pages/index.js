@@ -529,7 +529,7 @@ export default function Home() {
     return rawFields.map(f => {
       const fx = (f.x ?? 0) + (f.w ?? 0) / 2
       const fy = (f.y ?? 0) + (f.h ?? 0) / 2
-      const pageBxs = detectedBoxes.filter(b => b.page === f.page && b.confidence >= 0.4)
+      const pageBxs = detectedBoxes.filter(b => (b.page || 1) === (f.page || 1) && b.confidence >= 0.4)
 
       // Tier 1: Claude's centroid falls inside a detected box
       const containing = pageBxs.filter(b => fx >= b.x && fx <= b.x + b.w && fy >= b.y && fy <= b.y + b.h)
@@ -548,8 +548,8 @@ export default function Home() {
         return { ...f, x: best.x, y: best.y, w: best.w, h: best.h, confidence: best.confidence, needsReview: false }
       }
 
-      // Tier 3: no confident match — flag for review
-      return { ...f, x: null, y: null, w: null, h: null, needsReview: true }
+      // Tier 3: no confident match — keep Claude's coords, flag for review
+      return { ...f, needsReview: true }
     })
   }
 
@@ -612,7 +612,7 @@ export default function Home() {
       try {
         const raw = await renderRawPages()
         if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
-      } catch (err) { console.error('Render failed:', err) }
+      } catch (err) { console.error('Render failed:', err); alert('Could not open preview. Falling back to summary export.') }
     }
 
     // Flat PDF / image with coords: show interactive preview
