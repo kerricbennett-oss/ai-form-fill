@@ -607,37 +607,43 @@ export default function Home() {
       return
     }
 
-    // Block export if any field needs review — open preview so user can correct or override
-    if (fields.some(f => f.needsReview)) {
+    // Flat PDF / image: show interactive preview
+    if (fields.some(f => f.needsReview || f.x != null)) {
       try {
         const raw = await renderRawPages()
         if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
-      } catch (err) { console.error('Render failed:', err); alert('Could not open preview. Falling back to summary export.') }
+      } catch (err) {
+        alert('Could not render preview. Please use the summary export instead.')
+        return
+      }
     }
 
-    // Flat PDF / image with coords: show interactive preview
-    if (fields.some(f => f.x != null)) {
-      try {
-        const raw = await renderRawPages()
-        if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
-      } catch (err) { console.error('Render failed:', err) }
-    }
-
-    // No coords or render failed: summary PDF
+    // No coords: summary PDF
     const doc = await buildSummaryPdf()
     doc.save('completed_form.pdf')
   }
 
-  function omittedFilledFields() {
-    return fields.filter(f => filledValues[f.id] && (f.needsReview || f.x == null))
+  function exportRiskFields() {
+    return fields.filter(f => {
+      if (!filledValues[f.id]) return false
+      if (f.needsReview) return true
+      if (f.x == null || f.y == null || f.w == null || f.h == null) return true
+      if (f.confidence != null && f.confidence < 0.5) return true
+      return false
+    })
+  }
+
+  function confirmExportRisk(actionLabel) {
+    const risk = exportRiskFields()
+    if (risk.length === 0) return true
+    const names = risk.map(f => f.label).join(', ')
+    const lowConfOnly = risk.every(f => f.confidence != null && f.confidence < 0.5 && !f.needsReview)
+    const prefix = lowConfOnly ? 'Some fields have low-confidence placement.' : 'Some fields are missing or not safely placed.'
+    return window.confirm(`${prefix}\n\nAffected: ${names}\n\n${actionLabel} anyway?`)
   }
 
   async function downloadFromPreview() {
-    const omitted = omittedFilledFields()
-    if (omitted.length > 0) {
-      const names = omitted.map(f => f.label).join(', ')
-      if (!window.confirm(`Missing from PDF: ${names}\n\nDownload anyway?`)) return
-    }
+    if (!confirmExportRisk('Download')) return
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
@@ -650,17 +656,12 @@ export default function Home() {
   }
 
   async function exportAnyway() {
-    const omitted = omittedFilledFields()
-    if (omitted.length > 0) {
-      const names = omitted.map(f => f.label).join(', ')
-      if (!window.confirm(`Missing from PDF: ${names}\n\nExport anyway?`)) return
-    }
+    if (!confirmExportRisk('Export')) return
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
     } catch (err) {
-      const doc = await buildSummaryPdf()
-      doc.save('completed_form.pdf')
+      alert(`Export failed: ${err.message}`)
     } finally {
       setShowExportPreview(false)
       setRawPageUrls([])
@@ -693,11 +694,7 @@ export default function Home() {
 
   async function sendEmail() {
     if (!emailAddr.trim()) return
-    const omitted = omittedFilledFields()
-    if (omitted.length > 0) {
-      const names = omitted.map(f => f.label).join(', ')
-      if (!window.confirm(`Missing from emailed PDF: ${names}\n\nSend anyway? Cannot be undone.`)) return
-    }
+    if (!confirmExportRisk('Send')) return
     setEmailSending(true)
     try {
       const p0 = pages[0]
