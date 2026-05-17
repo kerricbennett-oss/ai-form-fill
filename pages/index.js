@@ -628,7 +628,16 @@ export default function Home() {
     doc.save('completed_form.pdf')
   }
 
+  function omittedFilledFields() {
+    return fields.filter(f => filledValues[f.id] && (f.needsReview || f.x == null))
+  }
+
   async function downloadFromPreview() {
+    const omitted = omittedFilledFields()
+    if (omitted.length > 0) {
+      const names = omitted.map(f => f.label).join(', ')
+      if (!window.confirm(`Missing from PDF: ${names}\n\nDownload anyway?`)) return
+    }
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
@@ -641,7 +650,11 @@ export default function Home() {
   }
 
   async function exportAnyway() {
-    setFields(prev => prev.map(f => ({ ...f, needsReview: false })))
+    const omitted = omittedFilledFields()
+    if (omitted.length > 0) {
+      const names = omitted.map(f => f.label).join(', ')
+      if (!window.confirm(`Missing from PDF: ${names}\n\nExport anyway?`)) return
+    }
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
@@ -680,9 +693,10 @@ export default function Home() {
 
   async function sendEmail() {
     if (!emailAddr.trim()) return
-    if (fields.some(f => f.needsReview)) {
-      alert('Some fields still need review before sending. Export the form first to correct placement.')
-      return
+    const omitted = omittedFilledFields()
+    if (omitted.length > 0) {
+      const names = omitted.map(f => f.label).join(', ')
+      if (!window.confirm(`Missing from emailed PDF: ${names}\n\nSend anyway? Cannot be undone.`)) return
     }
     setEmailSending(true)
     try {
