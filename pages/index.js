@@ -71,6 +71,14 @@ const s = {
   emailBtn: { fontSize: 12, padding: '5px 12px', borderRadius: 8, border: '0.5px solid #85B7EB', color: '#0C447C', background: 'transparent', cursor: 'pointer', fontFamily: 'inherit' },
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   modal: { background: '#fff', borderRadius: 14, padding: '28px 28px 22px', width: 340, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
+  promptModal: { background: '#fff', borderRadius: 14, padding: '24px 24px 20px', width: '82vw', maxWidth: 460, display: 'flex', flexDirection: 'column', gap: 14, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
+  promptTitle: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
+  promptBody: { fontSize: 13, lineHeight: 1.5, color: '#333' },
+  promptList: { display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflowY: 'auto', padding: '8px 10px', border: '0.5px solid #eee', borderRadius: 8, background: '#fafafa' },
+  promptItem: { fontSize: 12, color: '#5b3b00' },
+  promptActions: { display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' },
+  promptSecondary: { fontSize: 12, padding: '6px 14px', borderRadius: 8, border: '0.5px solid #ddd', background: '#fff', color: '#666', cursor: 'pointer', fontFamily: 'inherit' },
+  promptPrimary: { fontSize: 12, padding: '6px 14px', borderRadius: 8, border: '0.5px solid #1D9E75', background: '#1D9E75', color: '#fff', cursor: 'pointer', fontFamily: 'inherit' },
   previewModal: { background: '#fff', borderRadius: 14, padding: '20px 24px', width: '82vw', maxWidth: 720, maxHeight: '88vh', display: 'flex', flexDirection: 'column', gap: 12, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' },
   previewModalHdr: { fontSize: 15, fontWeight: 600, color: '#1a1a1a' },
   previewModalSub: { fontSize: 12, color: '#888', marginTop: -6 },
@@ -106,6 +114,7 @@ export default function Home() {
   const [isFillablePdf, setIsFillablePdf] = useState(false)
   const [showExportPreview, setShowExportPreview] = useState(false)
   const [rawPageUrls, setRawPageUrls] = useState([])
+  const [promptDialog, setPromptDialog] = useState(null)
   const msgsRef = useRef(null)
   const fileRef = useRef(null)
   const recogRef = useRef(null)
@@ -114,6 +123,8 @@ export default function Home() {
   const fieldItemRefs = useRef({})
   const handleSendRef = useRef(null)
   const dragRef = useRef(null)
+  const renderCacheRef = useRef({ key: null, pages: null })
+  const promptResolverRef = useRef(null)
 
   function stopAll() {
     window.speechSynthesis?.cancel()
@@ -194,6 +205,7 @@ export default function Home() {
     setEditValue('')
     setShowExportPreview(false)
     setRawPageUrls([])
+    setPromptDialog(null)
   }
 
   function loadFiles(fileList) {
@@ -202,6 +214,7 @@ export default function Home() {
 
     setScanned(false); setFields([]); setFilledValues({}); setFillingIds({}); setHistory([])
     setShowExportPreview(false); setRawPageUrls([])
+    setPromptDialog(null)
     setIsFillablePdf(false)
     setMessages([{ role: 'ai', text: 'Form loaded! Hit "Scan & detect fields" to read your form.' }])
 
@@ -216,13 +229,15 @@ export default function Home() {
         done++
         if (done === arr.length) {
           setPages([...loaded])
-          // Detect fillable PDF fields
-          if (f.type === 'application/pdf') {
+          // Detect fillable PDF fields across all uploaded PDFs, not just the last one to finish.
+          const pdfPages = loaded.filter(p => p.mime === 'application/pdf' && p.b64)
+          for (const pdfPage of pdfPages) {
             try {
-              const detected = await detectFillableFields(b64)
+              const detected = await detectFillableFields(pdfPage.b64)
               if (detected && detected.length > 0) {
                 setIsFillablePdf(true)
                 setMessages([{ role: 'ai', text: `Fillable PDF detected with ${detected.length} form fields. Hit "Scan & detect fields" to load them.` }])
+                break
               }
             } catch (_) { /* not fillable, continue normally */ }
           }
@@ -457,7 +472,24 @@ export default function Home() {
     })
   }
 
+  function renderKey() {
+    return pages.map(p => `${p.mime}:${p.name || ''}:${p.b64?.length || 0}`).join('|')
+  }
+
+  function cloneCanvas(sourceCanvas) {
+    const canvas = document.createElement('canvas')
+    canvas.width = sourceCanvas.width
+    canvas.height = sourceCanvas.height
+    canvas.getContext('2d').drawImage(sourceCanvas, 0, 0)
+    return canvas
+  }
+
   async function renderPageCanvases() {
+    const key = renderKey()
+    if (renderCacheRef.current.key === key && renderCacheRef.current.pages) {
+      return renderCacheRef.current.pages
+    }
+
     const p0 = pages[0]
     const isPdf = p0?.mime === 'application/pdf'
     const results = []
@@ -496,6 +528,8 @@ export default function Home() {
         throw err
       }
     }
+
+    renderCacheRef.current = { key, pages: results }
     return results
   }
 
@@ -503,8 +537,9 @@ export default function Home() {
     if (!fields.some(f => f.x != null)) return []
     const rendered = await renderPageCanvases()
     return rendered.map(({ canvas, pageNum }) => {
-      overlayCanvas(canvas, pageNum)
-      return { dataUrl: canvas.toDataURL('image/jpeg', 0.95), width: canvas.width, height: canvas.height }
+      const workCanvas = cloneCanvas(canvas)
+      overlayCanvas(workCanvas, pageNum)
+      return { dataUrl: workCanvas.toDataURL('image/jpeg', 0.95), width: workCanvas.width, height: workCanvas.height }
     })
   }
 
@@ -613,7 +648,10 @@ export default function Home() {
         const raw = await renderRawPages()
         if (raw.length > 0) { setRawPageUrls(raw); setShowExportPreview(true); return }
       } catch (err) {
-        alert('Could not render preview. Please use the summary export instead.')
+        const useSummary = await confirmSummaryFallback()
+        if (!useSummary) return
+        const doc = await buildSummaryPdf()
+        doc.save('completed_form.pdf')
         return
       }
     }
@@ -633,17 +671,58 @@ export default function Home() {
     })
   }
 
-  function confirmExportRisk(actionLabel) {
+  function bytesToBase64(bytes) {
+    let binary = ''
+    const chunkSize = 0x8000
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize))
+    }
+    return btoa(binary)
+  }
+
+  function openPrompt(dialog) {
+    return new Promise(resolve => {
+      promptResolverRef.current = resolve
+      setPromptDialog(dialog)
+    })
+  }
+
+  function closePrompt(result) {
+    if (promptResolverRef.current) {
+      promptResolverRef.current(result)
+      promptResolverRef.current = null
+    }
+    setPromptDialog(null)
+  }
+
+  async function confirmExportRisk(actionLabel) {
     const risk = exportRiskFields()
     if (risk.length === 0) return true
-    const names = risk.map(f => f.label).join(', ')
     const lowConfOnly = risk.every(f => f.confidence != null && f.confidence < 0.5 && !f.needsReview)
-    const prefix = lowConfOnly ? 'Some fields have low-confidence placement.' : 'Some fields are missing or not safely placed.'
-    return window.confirm(`${prefix}\n\nAffected: ${names}\n\n${actionLabel} anyway?`)
+    const body = lowConfOnly
+      ? 'Some fields have low-confidence placement.'
+      : 'Some fields are missing or not safely placed.'
+    return openPrompt({
+      title: `${actionLabel} with warnings?`,
+      body,
+      items: risk.map(f => f.label),
+      confirmLabel: `${actionLabel} anyway`,
+      cancelLabel: 'Cancel',
+    })
+  }
+
+  async function confirmSummaryFallback() {
+    return openPrompt({
+      title: 'Preview could not render',
+      body: 'Could not render the visual PDF preview.',
+      items: ['Create a summary PDF instead?'],
+      confirmLabel: 'Create summary',
+      cancelLabel: 'Cancel',
+    })
   }
 
   async function downloadFromPreview() {
-    if (!confirmExportRisk('Download')) return
+    if (!(await confirmExportRisk('Download'))) return
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
@@ -656,7 +735,7 @@ export default function Home() {
   }
 
   async function exportAnyway() {
-    if (!confirmExportRisk('Export')) return
+    if (!(await confirmExportRisk('Export'))) return
     try {
       const doc = await buildVisualPdf()
       doc.save('completed_form.pdf')
@@ -694,7 +773,7 @@ export default function Home() {
 
   async function sendEmail() {
     if (!emailAddr.trim()) return
-    if (!confirmExportRisk('Send')) return
+    if (!(await confirmExportRisk('Send'))) return
     setEmailSending(true)
     try {
       const p0 = pages[0]
@@ -704,7 +783,7 @@ export default function Home() {
         const valuesByFieldName = {}
         fields.forEach(f => { if (filledValues[f.id]) valuesByFieldName[f.pdfFieldName || f.id] = filledValues[f.id] })
         const filledBytes = await fillPdf(p0.b64, valuesByFieldName)
-        pdfBase64 = btoa(String.fromCharCode(...filledBytes))
+        pdfBase64 = bytesToBase64(filledBytes)
       } else {
         const doc = await buildVisualPdf()
         pdfBase64 = doc.output('datauristring').split(',')[1]
@@ -960,6 +1039,30 @@ export default function Home() {
           </div>
         )
       })()}
+
+      {promptDialog && (
+        <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) closePrompt(false) }}>
+          <div style={s.promptModal}>
+            <div style={s.promptTitle}>{promptDialog.title}</div>
+            <div style={s.promptBody}>{promptDialog.body}</div>
+            {Array.isArray(promptDialog.items) && promptDialog.items.length > 0 && (
+              <div style={s.promptList}>
+                {promptDialog.items.map((item, idx) => (
+                  <div key={idx} style={s.promptItem}>{item}</div>
+                ))}
+              </div>
+            )}
+            <div style={s.promptActions}>
+              <button style={s.promptSecondary} onClick={() => closePrompt(false)}>
+                {promptDialog.cancelLabel || 'Cancel'}
+              </button>
+              <button style={s.promptPrimary} onClick={() => closePrompt(true)}>
+                {promptDialog.confirmLabel || 'Continue'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showEmailModal && (
         <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) setShowEmailModal(false) }}>
